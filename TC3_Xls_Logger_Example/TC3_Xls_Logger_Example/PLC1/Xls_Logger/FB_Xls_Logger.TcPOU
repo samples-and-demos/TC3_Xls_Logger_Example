@@ -1,0 +1,523 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <POU Name="FB_Xls_Logger" Id="{1dfb2ce1-c68f-45b5-9430-e35f4d90692d}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_Xls_Logger
+VAR_INPUT
+	bLog:BOOL;//TRUE = start logging, FALSE = Stop logging
+	eLogMode:(TIMER_INTERVAL,TASK_CYCLE_TIME);
+	iloggingRateSec:DINT:=1; // sampling rate in secounds
+	sFilePath:STRING:='C:\Temp\';
+	sFileName:STRING:='Records';
+	sJobName:STRING:='Job1';
+	arrRecordsData:ARRAY[1..iMaxRecords]OF ST_Record;
+	
+END_VAR
+VAR_OUTPUT
+	iCurretBufferLoad:DINT;
+	sStartRecoredTime:STRING;
+	sEndRecoredTime:STRING;
+	sCurrentSystemTime:STRING;
+	sCurrentSystemDate:STRING;
+	sCustomTimeStamp:STRING;
+	bFileError:BOOL;
+END_VAR
+VAR
+	arrBuffer:ARRAY[1..iMaxBufferSize]OF STRING(255);
+	sRecordLine:STRING(255);
+	sBufferToWrite:STRING(255*iMaxBufferSize);
+	iBufferToWriteSize:UDINT:=0;
+	rTrig_StartLog:r_trig;
+	fTrig_EndLog:f_trig;
+	fbLocalSystemTime:FB_LocalSystemTime;
+	sFileHeader:STRING(255);
+	i: UDINT;
+	iActualBufferRecoreds:UDINT;
+	
+	fbFileOpen					:	FB_FileOpen;
+	fbFileClose					:	FB_FileClose;
+	fbFileWrite					:	FB_FileWrite;
+	fbFileGet					:	FB_FileGets;
+	fbFileRename				:	FB_FileRename;
+	
+	bWrite:BOOL:=FALSE;
+	eFileWriteState:(INIT,OpenFile,WriteToFile,CloseFile,ERROR);
+	rtrigWriteToFile:r_trig;
+	tonRecPulse:ton;
+	
+	sRowToWrite: STRING(255);
+	bFillBuffer: BOOL;
+END_VAR
+VAR CONSTANT
+	iMaxBufferSize:UDINT:=70; //record buffer size
+	iMaxRecords:INT:=10;// max recording parameters 
+	//iMaxReadRecords:UDINT:=100000;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[//Get system time
+ACT_SystemTime();
+
+//Start/Stop recording
+rTrig_StartLog(CLK:=bLog );
+fTrig_EndLog(CLK:= bLog);
+
+//---start recording-----
+IF rTrig_StartLog.Q THEN
+	//set file headers
+	sFileHeader:= concat(sJobName,'$nDate$TTime');
+	FOR i:=1 TO iMaxRecords DO
+		IF arrRecordsData[i].bEnableRecord THEN
+			sFileHeader:=concat(sFileHeader,
+							concat('$T',arrRecordsData[i].sDescription));
+		END_IF
+	END_FOR
+	
+	sBufferToWrite:=sFileHeader;
+	iBufferToWriteSize:=LEN(sFileHeader);
+	
+	//set file name
+	fbFileOpen.sPathName:=concat(sFilePath,
+						concat(sFileName,
+							concat('_',
+								concat(sJobName,
+									concat('_',
+										concat(sCurrentSystemDate,'.xls'))))));
+	
+
+	eFileWriteState:=INIT;
+	fbFileRename(sOldName:=fbFileOpen.sPathName,sNewName:=fbFileOpen.sPathName,bExecute:=TRUE);
+	
+END_IF
+
+IF fbFileRename.bExecute and NOT fbFileRename.bBusy THEN
+	fbFileRename.bExecute:=FALSE;
+	IF fbFileRename.bError THEN
+		bWrite:=TRUE;
+	END_IF	
+END_IF
+
+
+	
+// filling buffer with new line by recored reate
+tonRecPulse(IN:= bLog, PT:= DINT_TO_TIME(iloggingRateSec*1000));
+CASE eLogMode OF
+	TIMER_INTERVAL:
+		IF tonRecPulse.Q THEN
+			bFillBuffer:=TRUE;	
+		END_IF
+		
+	TASK_CYCLE_TIME:
+			bFillBuffer:=TRUE;
+	
+END_CASE
+
+IF bFillBuffer AND bLog THEN
+	tonRecPulse(IN:= FALSE);
+	bFillBuffer:=FALSE;	
+	
+	//create new record line
+	sRecordLine:=concat('$n',
+					concat(sCurrentSystemDate,
+						concat('$T', sCurrentSystemTime)));
+		FOR i:=1 TO iMaxRecords DO
+			IF arrRecordsData[i].bEnableRecord THEN
+				sRecordLine:=concat(sRecordLine,
+								concat('$T',REAL_TO_STRING(arrRecordsData[i].rVal)));					
+			END_IF
+		END_FOR
+	iActualBufferRecoreds:=Push(sRecordToPush:= sRecordLine);
+END_IF
+
+//write buffer to file
+rtrigWriteToFile(CLK:=iActualBufferRecoreds > iMaxBufferSize - 10);
+
+IF (rtrigWriteToFile.Q) OR fTrig_EndLog.Q THEN
+	memset(ADR(sBufferToWrite),0,SIZEOF(sBufferToWrite));
+	iBufferToWriteSize:=0;
+	FOR i:=1 TO iActualBufferRecoreds DO	
+		sRowToWrite:=pop();
+		memcpy((ADR(sBufferToWrite)+iBufferToWriteSize),ADR(sRowToWrite),LEN(sRowToWrite));
+		iBufferToWriteSize:=iBufferToWriteSize+LEN(sBufferToWrite);
+	END_FOR
+	bWrite:=TRUE;
+END_IF
+
+
+CASE eFileWriteState OF
+	INIT:
+		fbFileOpen(bExecute:=FALSE);
+		fbFileWrite(bExecute:=FALSE);
+		fbFileClose(bExecute:=FALSE);
+		bFileError:=FALSE;
+		IF bWrite THEN
+			bWrite:=FALSE;
+			eFileWriteState:=OpenFile;
+		END_IF
+		
+	OpenFile:
+		fbFileOpen(bExecute:=TRUE);
+		IF NOT fbFileOpen.bBusy THEN
+			IF NOT fbFileOpen.bError THEN
+				eFileWriteState:=WriteToFile;
+			ELSE
+				bFileError:=TRUE;
+				eFileWriteState:=ERROR;
+			END_IF
+		END_IF
+		
+	WriteToFile:
+		fbFileWrite(hFile:= fbFileOpen.hFile, pWriteBuff:= ADR(sBufferToWrite), cbWriteLen:=iBufferToWriteSize , bExecute:= TRUE);
+		IF NOT fbFileWrite.bBusy THEN
+			IF NOT fbFileWrite.bError THEN
+				memset(ADR(sBufferToWrite),0,SIZEOF(sBufferToWrite));
+				eFileWriteState:=CloseFile;
+			ELSE
+				bFileError:=TRUE;
+				eFileWriteState:=ERROR;
+			END_IF
+		END_IF
+	
+	CloseFile:
+		fbFileClose(hFile:= fbFileOpen.hFile, bExecute:= TRUE);
+		IF NOT fbFileWrite.bBusy THEN
+			IF NOT fbFileWrite.bError THEN
+				eFileWriteState:=INIT;
+			ELSE
+				bFileError:=TRUE;
+				eFileWriteState:=ERROR;
+			END_IF
+		END_IF
+		
+	ERROR:
+		bFileError:=TRUE;
+		
+END_CASE
+
+
+fbFileOpen(
+	nMode:= FOPEN_MODEAPPEND OR FOPEN_MODEPLUS OR FOPEN_MODETEXT, 
+	ePath:= PATH_GENERIC, 
+	bExecute:= , 
+	tTimeout:= T#5S, 
+	bBusy=> , 
+	bError=> , 
+	nErrId=> , 
+	hFile=> );
+	
+fbFileWrite(
+	sNetId:= , 
+	hFile:= fbFileOpen.hFile, 
+	pWriteBuff:= , 
+	cbWriteLen:= , 
+	bExecute:= , 
+	tTimeout:= T#10S, 
+	bBusy=> , 
+	bError=> , 
+	nErrId=> , 
+	cbWrite=> );
+	
+fbFileClose(
+	sNetId:= , 
+	hFile:= fbFileOpen.hFile, 
+	bExecute:= , 
+	tTimeout:= T#10S, 
+	bBusy=> , 
+	bError=> , 
+	nErrId=> );
+
+fbFileRename(
+	sNetId:= , 
+	sOldName:= , 
+	sNewName:= , 
+	ePath:= PATH_GENERIC, 
+	bExecute:= , 
+	tTimeout:= T#5S, 
+	bBusy=> , 
+	bError=> , 
+	nErrId=> );
+	
+
+
+
+]]></ST>
+    </Implementation>
+    <Action Name="ACT_SystemTime" Id="{55885e7d-6500-4608-8ced-96bffeb3b171}">
+      <Implementation>
+        <ST><![CDATA[//read current system time
+fbLocalSystemTime(bEnable:= TRUE);
+
+
+//System time to strings 1. time 2. date
+sCurrentSystemTime:=concat(concat(concat(concat(concat(concat(METH_TimeParToString(fbLocalSystemTime.systemTime.wHour),':'),METH_TimeParToString(fbLocalSystemTime.systemTime.wMinute)),':'),METH_TimeParToString(fbLocalSystemTime.systemTime.wSecond)),':'),WORD_TO_STRING(fbLocalSystemTime.systemTime.wMilliseconds));
+sCurrentSystemDate:=concat(concat(concat(concat(METH_TimeParToString(fbLocalSystemTime.systemTime.wDay),'.'),METH_TimeParToString(fbLocalSystemTime.systemTime.wMonth)),'.'),WORD_TO_STRING(fbLocalSystemTime.systemTime.wYear));
+sCustomTimeStamp:=concat(concat(sCurrentSystemDate ,' '),sCurrentSystemTime);
+
+//Set local time
+
+
+
+
+]]></ST>
+      </Implementation>
+    </Action>
+    <Method Name="METH_ConcatPtr" Id="{21b10177-8103-45db-83ef-887d333cd3a6}">
+      <Declaration><![CDATA[METHOD METH_ConcatPtr : BOOL
+VAR_INPUT
+	src1Addr : POINTER TO STRING; //The address of source string 1
+	src1Size : UDINT; //The size of source string 1
+	src2Addr : POINTER TO STRING; //The address of source string 2
+	src2Size : UDINT;//The size of source string 2
+	
+	destinationAddr : POINTER TO STRING; //The address of the destination string
+	destinationSize : UDINT; //The size of the destination string
+END_VAR
+VAR_OUTPUT
+	error : STRING(80); //Error message if the concat wasn't successful.
+END_VAR
+
+VAR
+	i: UDINT;
+	src1Len:UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[METH_ConcatPtr := TRUE;
+IF src1Size + src2Size > destinationSize THEN
+	METH_ConcatPtr := FALSE;
+	error := 'Destination string is not big enough';
+	RETURN;
+END_IF
+
+//Check length source string 1
+FOR i:=0 TO src1Size -1 DO
+	IF src1Addr^[i] = 0 THEN
+		src1Len:=i;
+		EXIT;
+	END_IF
+END_FOR
+
+//Set first source string 1 to destination
+IF MEMCPY(destinationAddr, src1Addr, src1Len) = 0 THEN
+	METH_ConcatPtr := FALSE;
+	error := 'Incorrect parameter values. destAddr == 0 or srcAddr==0 or n == 0';//taken from beckhoff documentation.
+END_IF
+
+IF MEMCPY(destinationAddr + src1Len, src2Addr, src2Size) = 0 THEN
+	METH_ConcatPtr := FALSE;
+	error := 'Incorrect parameter values. destAddr == 0 or srcAddr==0 or n == 0';//taken from beckhoff documentation.
+END_IF    ]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="METH_TimeParToString" Id="{779d62ad-4288-49e4-bec0-0f7cc8b1d682}">
+      <Declaration><![CDATA[METHOD METH_TimeParToString : string
+VAR_INPUT
+	wTimePar:WORD;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF wTimePar < 10 THEN
+	METH_TimeParToString:=concat(INT_TO_STRING(0),WORD_TO_STRING(wTimePar));
+ELSE
+	METH_TimeParToString:=WORD_TO_STRING(wTimePar);
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Pop" Id="{a5d2c0b0-2863-4c03-aab2-13750b02331d}">
+      <Declaration><![CDATA[METHOD PUBLIC Pop : String(1000)
+VAR_INPUT
+END_VAR
+VAR
+		i: DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[Pop:=arrBuffer[1];
+arrBuffer[iMaxBufferSize] := '' ;
+	
+FOR i:=1 TO (iMaxBufferSize) -1 DO
+	arrBuffer[i]:=arrBuffer[i+1];
+END_FOR
+	]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="Push" Id="{1be4ace0-da2a-49c8-8738-9173256c8dc8}">
+      <Declaration><![CDATA[METHOD PUBLIC Push : UDINT
+VAR_INPUT
+	sRecordToPush:STRING(1000);
+END_VAR
+
+VAR
+	i: UDINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR i:=1 TO (iMaxBufferSize) DO
+	IF arrBuffer[i]='' THEN
+		arrBuffer[i]:=sRecordToPush;
+		Push:=i;
+		EXIT;
+	END_IF
+	
+END_FOR]]></ST>
+      </Implementation>
+    </Method>
+    <LineIds Name="FB_Xls_Logger">
+      <LineId Id="26" Count="0" />
+      <LineId Id="47" Count="0" />
+      <LineId Id="38" Count="1" />
+      <LineId Id="36" Count="0" />
+      <LineId Id="43" Count="1" />
+      <LineId Id="40" Count="1" />
+      <LineId Id="45" Count="0" />
+      <LineId Id="59" Count="0" />
+      <LineId Id="54" Count="0" />
+      <LineId Id="56" Count="0" />
+      <LineId Id="60" Count="0" />
+      <LineId Id="238" Count="0" />
+      <LineId Id="61" Count="0" />
+      <LineId Id="57" Count="0" />
+      <LineId Id="476" Count="0" />
+      <LineId Id="144" Count="0" />
+      <LineId Id="158" Count="0" />
+      <LineId Id="234" Count="0" />
+      <LineId Id="91" Count="0" />
+      <LineId Id="62" Count="0" />
+      <LineId Id="88" Count="2" />
+      <LineId Id="236" Count="1" />
+      <LineId Id="63" Count="0" />
+      <LineId Id="232" Count="0" />
+      <LineId Id="64" Count="0" />
+      <LineId Id="450" Count="0" />
+      <LineId Id="92" Count="0" />
+      <LineId Id="46" Count="0" />
+      <LineId Id="465" Count="1" />
+      <LineId Id="471" Count="0" />
+      <LineId Id="470" Count="0" />
+      <LineId Id="472" Count="1" />
+      <LineId Id="468" Count="0" />
+      <LineId Id="464" Count="0" />
+      <LineId Id="94" Count="1" />
+      <LineId Id="241" Count="0" />
+      <LineId Id="245" Count="0" />
+      <LineId Id="532" Count="1" />
+      <LineId Id="535" Count="2" />
+      <LineId Id="543" Count="0" />
+      <LineId Id="541" Count="0" />
+      <LineId Id="544" Count="0" />
+      <LineId Id="542" Count="0" />
+      <LineId Id="534" Count="0" />
+      <LineId Id="531" Count="0" />
+      <LineId Id="247" Count="0" />
+      <LineId Id="250" Count="0" />
+      <LineId Id="540" Count="0" />
+      <LineId Id="248" Count="0" />
+      <LineId Id="260" Count="0" />
+      <LineId Id="322" Count="0" />
+      <LineId Id="477" Count="1" />
+      <LineId Id="264" Count="0" />
+      <LineId Id="319" Count="1" />
+      <LineId Id="323" Count="0" />
+      <LineId Id="321" Count="0" />
+      <LineId Id="318" Count="0" />
+      <LineId Id="325" Count="0" />
+      <LineId Id="249" Count="0" />
+      <LineId Id="475" Count="0" />
+      <LineId Id="388" Count="1" />
+      <LineId Id="375" Count="0" />
+      <LineId Id="242" Count="0" />
+      <LineId Id="381" Count="0" />
+      <LineId Id="383" Count="0" />
+      <LineId Id="377" Count="0" />
+      <LineId Id="386" Count="0" />
+      <LineId Id="379" Count="0" />
+      <LineId Id="384" Count="0" />
+      <LineId Id="380" Count="0" />
+      <LineId Id="385" Count="0" />
+      <LineId Id="378" Count="0" />
+      <LineId Id="244" Count="0" />
+      <LineId Id="240" Count="0" />
+      <LineId Id="96" Count="0" />
+      <LineId Id="100" Count="0" />
+      <LineId Id="107" Count="2" />
+      <LineId Id="121" Count="0" />
+      <LineId Id="103" Count="1" />
+      <LineId Id="106" Count="0" />
+      <LineId Id="105" Count="0" />
+      <LineId Id="110" Count="4" />
+      <LineId Id="117" Count="0" />
+      <LineId Id="119" Count="1" />
+      <LineId Id="171" Count="0" />
+      <LineId Id="118" Count="0" />
+      <LineId Id="115" Count="0" />
+      <LineId Id="102" Count="0" />
+      <LineId Id="145" Count="0" />
+      <LineId Id="161" Count="0" />
+      <LineId Id="163" Count="1" />
+      <LineId Id="251" Count="0" />
+      <LineId Id="165" Count="2" />
+      <LineId Id="170" Count="0" />
+      <LineId Id="168" Count="0" />
+      <LineId Id="162" Count="0" />
+      <LineId Id="172" Count="1" />
+      <LineId Id="175" Count="0" />
+      <LineId Id="179" Count="6" />
+      <LineId Id="178" Count="0" />
+      <LineId Id="186" Count="2" />
+      <LineId Id="146" Count="0" />
+      <LineId Id="101" Count="0" />
+      <LineId Id="93" Count="0" />
+      <LineId Id="75" Count="1" />
+      <LineId Id="79" Count="6" />
+      <LineId Id="74" Count="0" />
+      <LineId Id="122" Count="0" />
+      <LineId Id="124" Count="9" />
+      <LineId Id="123" Count="0" />
+      <LineId Id="134" Count="0" />
+      <LineId Id="136" Count="6" />
+      <LineId Id="135" Count="0" />
+      <LineId Id="440" Count="9" />
+      <LineId Id="439" Count="0" />
+      <LineId Id="86" Count="1" />
+      <LineId Id="50" Count="0" />
+      <LineId Id="35" Count="0" />
+      <LineId Id="37" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_Xls_Logger.ACT_SystemTime">
+      <LineId Id="21" Count="0" />
+      <LineId Id="35" Count="0" />
+      <LineId Id="22" Count="0" />
+      <LineId Id="31" Count="0" />
+      <LineId Id="62" Count="2" />
+      <LineId Id="1" Count="0" />
+      <LineId Id="44" Count="0" />
+      <LineId Id="43" Count="0" />
+      <LineId Id="60" Count="0" />
+      <LineId Id="89" Count="0" />
+      <LineId Id="96" Count="0" />
+      <LineId Id="83" Count="0" />
+      <LineId Id="97" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_Xls_Logger.METH_ConcatPtr">
+      <LineId Id="22" Count="23" />
+      <LineId Id="5" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_Xls_Logger.METH_TimeParToString">
+      <LineId Id="7" Count="3" />
+      <LineId Id="5" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_Xls_Logger.Pop">
+      <LineId Id="5" Count="0" />
+      <LineId Id="16" Count="1" />
+      <LineId Id="7" Count="0" />
+      <LineId Id="14" Count="1" />
+      <LineId Id="6" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_Xls_Logger.Push">
+      <LineId Id="7" Count="0" />
+      <LineId Id="13" Count="1" />
+      <LineId Id="24" Count="0" />
+      <LineId Id="16" Count="0" />
+      <LineId Id="15" Count="0" />
+      <LineId Id="8" Count="1" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

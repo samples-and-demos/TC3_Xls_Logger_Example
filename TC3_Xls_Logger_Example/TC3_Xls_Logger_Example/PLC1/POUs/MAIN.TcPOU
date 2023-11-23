@@ -1,0 +1,75 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <POU Name="MAIN" Id="{9d7055ad-56c2-4591-ac7e-8d447807dee8}" SpecialFunc="None">
+    <Declaration><![CDATA[PROGRAM MAIN
+VAR
+	//Logger FB
+	fbXls_Logger:FB_Xls_Logger;
+	bStartStopLog:BOOL;
+	sFilePath:STRING:='C:\Temp\';  //
+	sFileName:STRING:='Records';
+	sJobName:STRING:='Job1';
+	
+	//Data to recored
+	arrRecordsData:ARRAY[1..main.fbXls_Logger.iMaxRecords]OF ST_Record;
+	
+	
+	//analog parameter simulator
+	tonGenerator:ton;
+	randomNumber:drand;
+	i: INT;
+	bEnable: BOOL:=TRUE;
+	
+	
+	
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+//-------create analog random values ( for testing the logger )-------
+tonGenerator(IN:= NOT tonGenerator.Q , PT:=T#1MS , Q=> , ET=> );
+IF tonGenerator.Q AND bEnable THEN
+	FOR i:=1 TO main.fbXls_Logger.iMaxRecords DO
+		IF arrRecordsData[i].bEnableRecord THEN
+			randomNumber();
+			arrRecordsData[i].rVal:=randomNumber.Num*100;
+			arrRecordsData[i].sDescription:=concat('Data ',INT_TO_STRING(i));
+		END_IF	
+	END_FOR
+ELSIF tonGenerator.Q then
+	FOR i:=1 TO main.fbXls_Logger.iMaxRecords DO
+			arrRecordsData[i].rVal:=i;
+			arrRecordsData[i].sDescription:=concat('Data ',INT_TO_STRING(i));	
+	END_FOR
+END_IF
+//-----End analog Simulator code----------------------------------------
+
+
+
+//Call Logger FB
+fbXls_Logger(bLog:=bStartStopLog,
+			 sFilePath:=sFilePath,
+			 sFileName:=sFileName,
+			 sJobName:=sJobName,
+			 arrRecordsData:=arrRecordsData
+			);
+
+]]></ST>
+    </Implementation>
+    <LineIds Name="MAIN">
+      <LineId Id="121" Count="0" />
+      <LineId Id="49" Count="0" />
+      <LineId Id="52" Count="13" />
+      <LineId Id="51" Count="0" />
+      <LineId Id="50" Count="0" />
+      <LineId Id="66" Count="0" />
+      <LineId Id="98" Count="0" />
+      <LineId Id="48" Count="0" />
+      <LineId Id="2" Count="0" />
+      <LineId Id="6" Count="0" />
+      <LineId Id="71" Count="4" />
+      <LineId Id="15" Count="0" />
+      <LineId Id="28" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <DUT Name="ST_Record" Id="{39fbbd97-c9fe-4664-83ba-8194f83c12b8}">
+    <Declaration><![CDATA[TYPE ST_Record :
+STRUCT
+	bEnableRecord:BOOL:=TRUE;
+	sDescription:STRING:='Data..';
+	rVal:REAL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>
